@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lead Finder</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1a1d21;--mut:#6b7280;--bd:#e5e7eb;--ac:#0f766e}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1a1f26;--tx:#e8eaed;--mut:#9aa3af;--bd:#2a313b;--ac:#2dd4bf}}
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--tx);padding:14px;max-width:1000px;margin:auto}
+h1{font-size:20px;margin:4px 0 12px}
+.box{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
+input,select,button{font:inherit;padding:10px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--tx);width:100%;margin-bottom:8px}
+button{background:var(--ac);color:#fff;border:0;font-weight:600;cursor:pointer}
+button.alt{background:var(--card);color:var(--tx);border:1px solid var(--bd)}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1 1 140px}
+label{display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:14px}
+label input{width:auto;margin:0}
+.lead{border-top:1px solid var(--bd);padding:10px 0}.lead:first-child{border:0}
+.lead b{font-size:16px}.mut{color:var(--mut);font-size:13px}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;margin:4px 4px 0 0;border:1px solid var(--bd)}
+.hot{background:#fee2e2;color:#991b1b;border-color:#fecaca}.ok{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+a{color:var(--ac)}#st{min-height:20px;color:var(--mut);font-size:14px}
+</style>
+</head>
+<body>
+<h1>Lead Finder</h1>
+<div class="box">
+  <select id="cat">
+    <option value="salon">Salon / Spa / Beauty</option>
+    <option value="restaurant">Restaurants / Cafes</option>
+    <option value="gym">Gyms / Fitness</option>
+    <option value="dentist">Dentists / Clinics</option>
+    <option value="hotel">Hotels / Guest houses</option>
+    <option value="shop">Retail shops</option>
+    <option value="custom">Custom OSM tag…</option>
+  </select>
+  <input id="custom" placeholder="key=value e.g. craft=carpenter" style="display:none">
+  <input id="city" placeholder="City, e.g. Nairobi or Austin, Texas" autocomplete="off">
+  <div style="margin-bottom:8px">
+    <label><input type="checkbox" id="fNoSite"> No website</label>
+    <label><input type="checkbox" id="fPhone"> Has phone</label>
+  </div>
+  <div class="row"><button id="go">Find leads</button><button class="alt" id="csv">Export CSV</button></div>
+  <div id="st"></div>
+</div>
+<div class="box" id="out" style="display:none"></div>
+
+<script>
+const PRESETS={
+  salon:['shop=hairdresser','shop=beauty','amenity=spa','leisure=spa','shop=massage'],
+  restaurant:['amenity=restaurant','amenity=cafe','amenity=fast_food'],
+  gym:['leisure=fitness_centre','leisure=sports_centre'],
+  dentist:['amenity=dentist','amenity=clinic','amenity=doctors'],
+  hotel:['tourism=hotel','tourism=guest_house','tourism=hostel'],
+  shop:['shop']
+};
+const $=id=>document.getElementById(id);
+let rows=[];
+
+$('cat').onchange=()=>$('custom').style.display=$('cat').value==='custom'?'block':'none';
+$('go').onclick=search;
+$('csv').onclick=exportCsv;
+$('fNoSite').onchange=$('fPhone').onchange=render;
+$('city').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+
+function tagsFor(){
+  const c=$('cat').value;
+  if(c==='custom'){const v=$('custom').value.trim();return v?[v]:[];}
+  return PRESETS[c];
+}
+
+async function search(){
+  const city=$('city').value.trim(), tags=tagsFor();
+  if(!city||!tags.length){$('st').textContent='Enter a city and category.';return;}
+  $('go').disabled=true;$('st').textContent='Locating city…';
+  try{
+    const g=await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(city))).json();
+    if(!g.length)throw new Error('City not found');
+    const [s,n,w,e]=g[0].boundingbox.map(Number);
+    if((n-s)>1.5||(e-w)>1.5)throw new Error('Area too large. Try a city, not a whole state.');
+    const bb=`(${s},${w},${n},${e})`;
+    const parts=tags.map(t=>{const [k,v]=t.split('=');return v?`nwr["${k}"="${v}"]${bb};`:`nwr["${k}"]["name"]${bb};`}).join('');
+    $('st').textContent='Searching businesses…';
+    const q=`[out:json][timeout:60];(${parts});out center tags 500;`;
+    const r=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(q)});
+    if(!r.ok)throw new Error('Overpass busy, try again in a minute');
+    const d=await r.json();
+    rows=d.elements.filter(x=>x.tags&&x.tags.name).map(x=>{
+      const t=x.tags;
+      const site=t.website||t['contact:website']||t.url||'';
+      const phone=t.phone||t['contact:phone']||t['contact:mobile']||'';
+      const kind=(t.shop||t.amenity||t.leisure||t.tourism||t.craft||'business').replace(/_/g,' ');
+      const addr=[t['addr:housenumber'],t['addr:street'],t['addr:suburb']||t['addr:city']].filter(Boolean).join(' ');
+      const social=t['contact:facebook']||t.facebook||t['contact:instagram']||'';
+      return{name:t.name,kind,desc:t.description||(kind+(addr?' · '+addr:'')),site,phone,social,
+        email:t.email||t['contact:email']||'',
+        lat:x.lat||(x.center&&x.center.lat),lon:x.lon||(x.center&&x.center.lon)};
+    });
+    $('st').textContent=rows.length+' businesses found in '+g[0].display_name.split(',').slice(0,2).join(',');
+    render();
+  }catch(err){$('st').textContent=err.message}
+  $('go').disabled=false;
+}
+
+function visible(){
+  return rows.filter(r=>(!$('fNoSite').checked||!r.site)&&(!$('fPhone').checked||r.phone))
+    .sort((a,b)=>(!!a.site)-(!!b.site));
+}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function render(){
+  const v=visible();
+  $('out').style.display=rows.length?'block':'none';
+  $('out').innerHTML=(v.length?'':'<div class="mut">No results match the filters.</div>')+v.map(r=>{
+    const gm='https://www.google.com/maps/search/'+encodeURIComponent(r.name+' '+(r.lat?r.lat+','+r.lon:''));
+    return `<div class="lead"><b>${esc(r.name)}</b>
+    <div class="mut">${esc(r.desc)}</div>
+    <span class="tag ${r.site?'ok':'hot'}">${r.site?'Has website':'No website'}</span>
+    <span class="tag ${r.phone?'ok':''}">${r.phone?'Has phone':'No phone'}</span>
+    ${r.social&&!r.site?'<span class="tag">Social page only</span>':''}
+    <div style="margin-top:6px">${r.phone?`<a href="tel:${esc(r.phone)}">${esc(r.phone)}</a> · `:''}${r.site?`<a href="${esc(r.site)}" target="_blank" rel="noopener">site</a> · `:''}<a href="${gm}" target="_blank" rel="noopener">Reviews on Google Maps</a></div></div>`}).join('');
+}
+
+function exportCsv(){
+  const v=visible();if(!v.length)return;
+  const h=['name','type','description','has_website','website','has_phone','phone','email','social','lat','lon'];
+  const q=x=>'"'+String(x??'').replace(/"/g,'""')+'"';
+  const lines=[h.join(',')].concat(v.map(r=>[r.name,r.kind,r.desc,r.site?'yes':'no',r.site,r.phone?'yes':'no',r.phone,r.email,r.social,r.lat,r.lon].map(q).join(',')));
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/csv'}));
+  a.download='leads.csv';a.click();
+}
+</script>
+</body>
+</html>
